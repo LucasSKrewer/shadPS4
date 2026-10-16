@@ -3,7 +3,9 @@
 
 #include "ajm_result.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/libraries/ajm/ajm_at9.h"
+#include "core/libraries/error_codes.h"
 #include "error_codes.h"
 
 extern "C" {
@@ -88,6 +90,31 @@ void AjmAt9Decoder::GetInfo(void* out_info) const {
     info->frames_in_super_frame = m_codec_info.framesInSuperframe;
     info->next_frame_size = m_superframe_bytes_remain;
     info->frame_samples = m_codec_info.frameSamples;
+}
+
+int ParseAt9ConfigData(const u8* config_data, AjmDecAt9ParseResult* out_result) {
+    if (config_data == nullptr || out_result == nullptr) {
+        return ORBIS_OK;
+    }
+    // Decode the 4-byte ATRAC9 config with a throwaway LibAtrac9 handle (same path as Reset()).
+    void* handle = Atrac9GetHandle();
+    u8 cfg[ORBIS_AT9_CONFIG_DATA_SIZE];
+    std::memcpy(cfg, config_data, ORBIS_AT9_CONFIG_DATA_SIZE);
+    Atrac9InitDecoder(handle, cfg);
+    Atrac9CodecInfo info{};
+    Atrac9GetCodecInfo(handle, &info);
+    Atrac9ReleaseHandle(handle);
+
+    out_result->super_frame_size = static_cast<u32>(info.superframeSize);
+    out_result->frames_in_super_frame = static_cast<u32>(info.framesInSuperframe);
+    out_result->next_frame_size = static_cast<u32>(info.superframeSize);
+    out_result->frame_samples = static_cast<u32>(info.frameSamples);
+    out_result->super_frame_samples =
+        static_cast<u32>(info.frameSamples * info.framesInSuperframe);
+    LOG_INFO(Lib_Ajm, "AT9 parse: rate={} ch={} frameSamples={} framesInSF={} sfSize={}",
+             info.samplingRate, info.channels, info.frameSamples, info.framesInSuperframe,
+             info.superframeSize);
+    return ORBIS_OK;
 }
 
 u8 g_at9_guid[] = {0xD2, 0x42, 0xE1, 0x47, 0xBA, 0x36, 0x8D, 0x4D,

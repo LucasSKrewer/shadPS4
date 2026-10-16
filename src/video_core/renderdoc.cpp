@@ -7,6 +7,7 @@
 #include "video_core/renderdoc.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <renderdoc_app.h>
 
 #ifdef _WIN32
@@ -35,7 +36,10 @@ void LoadRenderDoc() {
 
     // Check if we are running by RDoc GUI
     HMODULE mod = GetModuleHandleA("renderdoc.dll");
-    if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
+    // The JSON renderdoc_enabled toggle does not currently reach IsRenderdocEnabled(); allow an
+    // explicit env override to load the offline RenderDoc runtime for headless frame captures.
+    const bool force_rdoc = std::getenv("SHADPS4_FORCE_RDOC") != nullptr;
+    if (!mod && (EmulatorSettings.IsRenderdocEnabled() || force_rdoc)) {
         // If enabled in config, try to load RDoc runtime in offline mode
         HKEY h_reg_key;
         LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,

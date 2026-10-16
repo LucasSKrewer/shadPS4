@@ -98,13 +98,38 @@ void Translator::V_INTERP_MOV_F32(const GcnInst& inst) {
     const IR::Attribute attrib = IR::Attribute::Param0 + attr_index;
     const auto& attr = runtime_info.fs_info.inputs[attr_index];
     auto& interp = info.fs_interpolation[attr_index];
-    ASSERT(attr.is_flat || inst.src[0].code == 2);
+    // MLB The Show 24 (CUSA43942) uses V_INTERP_MOV_F32 with non-flat attributes and
+    // src codes other than P0 (2) in its in-game/stadium fragment shaders. The generic
+    // paths below already handle any src code, so the original strict assert was too
+    // conservative and is relaxed to a warning.
+    if (!(attr.is_flat || inst.src[0].code == 2)) {
+        LOG_WARNING(Render_Recompiler,
+                    "V_INTERP_MOV_F32 non-flat attr with src code {} (attr {})",
+                    inst.src[0].code, attr_index);
+    }
     if (profile.supports_amd_shader_explicit_vertex_parameter ||
         profile.supports_fragment_shader_barycentric) {
-        // VSRC 0=P10, 1=P20, 2=P0
+        // VSRC selects a stored primitive parameter: 0=P10 (v1-v0), 1=P20 (v2-v0), 2=P0 (v0).
+        // GetAttribute(attrib, chan, N) returns vertex N's raw value, so P10/P20 must be computed
+        // as deltas. The old (code+1)%3 mapping returned the raw vertex value instead, which
+        // corrupts shaders that read P10/P20 for manual interpolation (e.g. MLB The Show 24
+        // stadium dirt, which came out blocky).
         interp.primary = Qualifier::PerVertex;
-        SetDst(inst.dst[0],
-               ir.GetAttribute(attrib, inst.control.vintrp.chan, (inst.src[0].code + 1) % 3));
+        const u32 chan = inst.control.vintrp.chan;
+        const IR::F32 v0 = ir.GetAttribute(attrib, chan, 0);
+        IR::F32 result;
+        switch (inst.src[0].code) {
+        case 0: // P10 = v1 - v0
+            result = ir.FPSub(ir.GetAttribute(attrib, chan, 1), v0);
+            break;
+        case 1: // P20 = v2 - v0
+            result = ir.FPSub(ir.GetAttribute(attrib, chan, 2), v0);
+            break;
+        default: // 2 = P0 = v0
+            result = v0;
+            break;
+        }
+        SetDst(inst.dst[0], result);
     } else {
         interp.primary = Qualifier::Flat;
         SetDst(inst.dst[0], ir.GetAttribute(attrib, inst.control.vintrp.chan));

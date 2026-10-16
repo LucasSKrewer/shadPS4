@@ -153,20 +153,38 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     }
 
     constexpr auto tiling = vk::ImageTiling::eOptimal;
-    const auto supported_format = instance.GetSupportedFormat(info.pixel_format, format_features);
-    const vk::PhysicalDeviceImageFormatInfo2 format_info{
-        .format = supported_format,
-        .type = ConvertImageType(info.type),
-        .tiling = tiling,
-        .usage = usage_flags,
-        .flags = flags,
+    auto supported_format = instance.GetSupportedFormat(info.pixel_format, format_features);
+    const auto query_format = [&]() {
+        const vk::PhysicalDeviceImageFormatInfo2 format_info{
+            .format = supported_format,
+            .type = ConvertImageType(info.type),
+            .tiling = tiling,
+            .usage = usage_flags,
+            .flags = flags,
+        };
+        return instance.GetPhysicalDevice().getImageFormatProperties2(format_info);
     };
-    const auto image_format_properties =
-        instance.GetPhysicalDevice().getImageFormatProperties2(format_info);
+    auto image_format_properties = query_format();
+    if (image_format_properties.result == vk::Result::eErrorFormatNotSupported &&
+        (usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+        // Some drivers reject Storage usage on compressed (BC) formats even with ExtendedUsage +
+        // BlockTexelViewCompatible. These textures (e.g. BC5 normal maps, BC6H HDR) are only
+        // sampled in practice, so drop Storage (and the block-texel-view flag) and retry — the
+        // texture cache re-creates with storage later if a shader ever actually needs it. Without
+        // this the image is created broken and renders as garbage blocks (MLB stadium dirt/crowd).
+        usage_flags &= ~vk::ImageUsageFlagBits::eStorage;
+        flags &= ~vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
+        format_features = FormatFeatureFlags(usage_flags);
+        supported_format = instance.GetSupportedFormat(info.pixel_format, format_features);
+        image_format_properties = query_format();
+        LOG_WARNING(Render_Vulkan,
+                    "Compressed format {} unsupported with storage; retried sampled-only",
+                    vk::to_string(supported_format));
+    }
     if (image_format_properties.result == vk::Result::eErrorFormatNotSupported) {
         LOG_ERROR(Render_Vulkan, "image format {} type {} is not supported (flags {}, usage {})",
-                  vk::to_string(supported_format), vk::to_string(format_info.type),
-                  vk::to_string(format_info.flags), vk::to_string(format_info.usage));
+                  vk::to_string(supported_format), vk::to_string(ConvertImageType(info.type)),
+                  vk::to_string(flags), vk::to_string(usage_flags));
     }
     supported_samples = image_format_properties.result == vk::Result::eSuccess
                             ? image_format_properties.value.imageFormatProperties.sampleCounts

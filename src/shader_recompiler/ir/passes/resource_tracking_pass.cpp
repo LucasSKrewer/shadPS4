@@ -407,10 +407,14 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
         }
     }
     if (sources.empty()) {
+        // MLB The Show 24 (CUSA43942): stadium shaders use bindless sharp access
+        // (descriptor sourced dynamically from a const buffer) which this recompiler
+        // cannot statically resolve. Instead of aborting, log and let the caller fall
+        // back to a default binding so the rest of the scene can still render.
         if (found_read_const_buffer) {
-            UNREACHABLE_MSG("Bindless sharp access detected pc={:#x}", pc);
+            LOG_ERROR(Render_Recompiler, "Bindless sharp access detected pc={:#x} (fallback)", pc);
         } else {
-            UNREACHABLE_MSG("Unable to find sharp sources pc={:#x}", pc);
+            LOG_ERROR(Render_Recompiler, "Unable to find sharp sources pc={:#x} (fallback)", pc);
         }
     }
     return sources;
@@ -458,6 +462,12 @@ SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
 
 SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, u32 pc = 0) {
     auto sources = FindSharpSources(inst, pc);
+    if (sources.empty()) {
+        // Bindless / unresolved sharp: fall back to a default location so the shader
+        // still compiles (the affected resource may render incorrectly).
+        LOG_WARNING(Render_Recompiler, "Falling back to default sharp location pc={:#x}", pc);
+        return static_cast<SharpLocation>(0);
+    }
     size_t num_sources = sources.size();
     ASSERT(current_parent.cfg_block);
 

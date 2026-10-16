@@ -987,6 +987,10 @@ s32 PS4_SYSV_ABI sceAudio3dPortOpen(const Libraries::UserService::OrbisUserServi
         LOG_ERROR(Lib_Audio3d, "!initialized");
         return ORBIS_AUDIO3D_ERROR_NOT_READY;
     }
+    // VERIFIED (MLB The Show 24): refusing the 3D port corrupts game state — it breaks
+    // 3 different ways at the field-load stage (PitchClock freeze / access violation in
+    // MainMultiTask / vk_scheduler submit assert). The game hard-depends on Audio3d with
+    // no stereo fallback. Not a viable workaround; reverted.
 
     OrbisAudio3dOpenParameters effective{
         .size_this = 0x28,

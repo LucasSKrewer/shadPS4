@@ -109,6 +109,18 @@ static int GetPortRange(OrbisAudioOutPort type) {
 }
 
 static int GetPortId(s32 handle) {
+    // MLB The Show 24 (CUSA43942) workaround: the game's NCA audio runtime stores an
+    // Audio3d error code (ORBIS_AUDIO3D_ERROR_INVALID_PORT) where an audioout handle
+    // should be, then drives its audio pump with it forever. Alias the bogus handle to
+    // the real Audio3d port (fixed slot 22) when one is open, so the pump operates on
+    // the actual port and audio data can flow.
+    if (handle == static_cast<s32>(0x80EA0002)) {
+        std::shared_lock read_lock{port_table_mutex};
+        if (port_table[22]) {
+            return 22;
+        }
+    }
+
     const int port_id = handle & 0xFF;
 
     if (port_id >= ORBIS_AUDIO_OUT_NUM_PORTS) {
@@ -468,6 +480,25 @@ s32 PS4_SYSV_ABI sceAudioOutGetPortState(s32 handle, OrbisAudioOutPortState* sta
 
     int port_id = GetPortId(handle);
     if (port_id < 0) {
+        // DIAGNOSTIC HACK (MLB The Show 24, CUSA43942): the game's NCA audio runtime
+        // ends up polling GetPortState forever with an Audio3d error code
+        // (0x80EA0002) stored where a handle should be, spinning its pump thread and
+        // stalling the match loading screen. Pretend the port is connected so the
+        // pump can make progress, to test whether audio is the loading blocker.
+        if (handle == static_cast<s32>(0x80EA0002) && state) {
+            static bool logged_once = false;
+            if (!logged_once) {
+                logged_once = true;
+                LOG_WARNING(Lib_AudioOut,
+                            "MLB diagnostic hack: faking CONNECTED state for bogus handle {:#x}",
+                            handle);
+            }
+            *state = {};
+            state->output = ORBIS_AUDIO_OUT_STATE_OUTPUT_CONNECTED_PRIMARY;
+            state->channel = 2;
+            state->volume = 127;
+            return ORBIS_OK;
+        }
         LOG_DEBUG(Lib_AudioOut, "Invalid port id for handle {:#x}", handle);
         return port_id;
     }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -274,8 +275,16 @@ GraphicsPipeline::GraphicsPipeline(
             LiverpoolToVK::NumSamples(key.depth_samples, instance.GetDepthSampleCounts()),
     };
 
+    // RenderDoc 1.45 cannot serialize VkAttachmentSampleCountInfoAMD in the pipeline pNext
+    // chain and crashes on capture. This env gate lets a capture session drop the (redundant
+    // for single-sample) struct without touching normal play. Off by default => identical to
+    // upstream behavior.
+    static const bool disable_mixed_samples =
+        std::getenv("SHADPS4_DISABLE_MIXED_SAMPLES") != nullptr;
+    const bool attach_mixed_samples =
+        instance.IsMixedDepthSamplesSupported() && !disable_mixed_samples;
     const vk::PipelineRenderingCreateInfo pipeline_rendering_ci = {
-        .pNext = instance.IsMixedDepthSamplesSupported() ? &mixed_samples : nullptr,
+        .pNext = attach_mixed_samples ? &mixed_samples : nullptr,
         .colorAttachmentCount = key.num_color_attachments,
         .pColorAttachmentFormats = color_formats.data(),
         .depthAttachmentFormat = key.z_format != AmdGpu::DepthBuffer::ZFormat::Invalid

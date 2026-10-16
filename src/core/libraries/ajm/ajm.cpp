@@ -3,6 +3,7 @@
 
 #include "common/logging/log.h"
 #include "core/libraries/ajm/ajm.h"
+#include "core/libraries/ajm/ajm_at9.h"
 #include "core/libraries/ajm/ajm_context.h"
 #include "core/libraries/ajm/ajm_error.h"
 #include "core/libraries/ajm/ajm_mp3.h"
@@ -118,9 +119,13 @@ int PS4_SYSV_ABI sceAjmBatchWait(const u32 context_id, const u32 batch_id, const
     return it->second->BatchWait(batch_id, timeout, batch_error);
 }
 
-int PS4_SYSV_ABI sceAjmDecAt9ParseConfigData() {
-    LOG_ERROR(Lib_Ajm, "(STUBBED) called");
-    return ORBIS_OK;
+int PS4_SYSV_ABI sceAjmDecAt9ParseConfigData(const u8* config_data,
+                                             AjmDecAt9ParseResult* out_result) {
+    // Previously a no-op stub returning ORBIS_OK with an empty result struct. The game (e.g. MLB
+    // The Show 24) parses its ATRAC9 config here and reads frame_samples/super_frame_samples back;
+    // an unfilled result left the audio pump's resampler dividing by 0 and spinning forever, which
+    // hung the match load. Now we actually decode the config via LibAtrac9.
+    return ParseAt9ConfigData(config_data, out_result);
 }
 
 int PS4_SYSV_ABI sceAjmDecMp3ParseFrame(const u8* buf, u32 stream_size, int parse_ofl,

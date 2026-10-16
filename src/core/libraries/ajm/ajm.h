@@ -210,7 +210,9 @@ int PS4_SYSV_ABI sceAjmBatchStartBuffer(u32 context, u8* batch, u32 batch_size, 
                                         AjmBatchError* batch_error, u32* out_batch_id);
 int PS4_SYSV_ABI sceAjmBatchWait(const u32 context, const u32 batch_id, const u32 timeout,
                                  AjmBatchError* const batch_error);
-int PS4_SYSV_ABI sceAjmDecAt9ParseConfigData();
+struct AjmDecAt9ParseResult;
+int PS4_SYSV_ABI sceAjmDecAt9ParseConfigData(const u8* config_data,
+                                             AjmDecAt9ParseResult* out_result);
 int PS4_SYSV_ABI sceAjmDecMp3ParseFrame(const u8* stream, u32 stream_size, int parse_ofl,
                                         AjmDecMp3ParseFrame* frame);
 int PS4_SYSV_ABI sceAjmFinalize();

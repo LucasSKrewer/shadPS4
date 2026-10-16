@@ -27,6 +27,21 @@ struct AjmSidebandDecAt9CodecInfo {
     u32 frame_samples;
 };
 
+// Result layout filled by sceAjmDecAt9ParseConfigData. The game reads frame_samples (+0xC) as
+// the resampler's normalization seed and super_frame_samples (+0x10) as the ratio numerator base;
+// leaving them 0 (the old stub) hangs the audio pump forever in its normalize loop.
+struct AjmDecAt9ParseResult {
+    u32 super_frame_size;      // +0x0
+    u32 frames_in_super_frame; // +0x4
+    u32 next_frame_size;       // +0x8
+    u32 frame_samples;         // +0xC
+    u32 super_frame_samples;   // +0x10
+};
+
+// Parses ATRAC9 config data (ORBIS_AT9_CONFIG_DATA_SIZE bytes) into the result the game expects.
+// Returns ORBIS_OK (the SDK's success convention; the game reads the filled struct, not the code).
+int ParseAt9ConfigData(const u8* config_data, AjmDecAt9ParseResult* out_result);
+
 struct AjmAt9Decoder final : AjmCodec {
     explicit AjmAt9Decoder(AjmFormatEncoding format, AjmAt9CodecFlags flags, u32 channels);
     ~AjmAt9Decoder() override;

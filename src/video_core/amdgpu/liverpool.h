@@ -121,7 +121,10 @@ public:
     void ReserveCopyBufferSpace() {
         GpuQueue& gfx_queue = mapped_queues[GfxQueueId];
         std::scoped_lock lk(gfx_queue.m_access);
-        constexpr size_t GfxReservedSize = 2_MB >> 2;
+        // Bumped from 2_MB: MLB The Show 24 (CUSA43942) heavy scenes (e.g. RTTS locker room)
+        // submit a per-frame guest DCB larger than 2 MB, which tripped the reserved-space assert
+        // in CopyCmdBuffers and hung the game during loading when copy_gpu_buffers is enabled.
+        constexpr size_t GfxReservedSize = 32_MB >> 2;
         gfx_queue.ccb_buffer.reserve(GfxReservedSize);
         gfx_queue.dcb_buffer.reserve(GfxReservedSize);
     }

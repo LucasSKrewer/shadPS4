@@ -430,9 +430,13 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     EmulatorSettings.Load(id);
-    // Windows static guest red-zone protection
+    // FIX (MLB The Show 24 e afins): a proteção estática de red-zone é necessária pra evitar que
+    // fastmem faults corrompam a red-zone de funções guest folha (senão o jogo crasha com
+    // null-deref ao montar a partida). Forçado aqui porque o caminho de config não resolve o modo
+    // corretamente em runtime (o getter retorna Disabled mesmo com o grupo carregado — bug mais
+    // fundo no resolve de Setting, ainda não isolado). Ver GetWindowsGuestRedZoneProtectionMode().
     WindowsGuestRedZoneProtection::SetActiveMode(
-        EmulatorSettings.GetWindowsGuestRedZoneProtectionMode());
+        WindowsGuestRedZoneProtectionMode::StaticPatching);
     // Switch to configured log
     Common::Log::Switch((!id.empty() && EmulatorSettings.IsLogSeparate()) ? id + ".log"
                                                                           : "shad_log.txt");

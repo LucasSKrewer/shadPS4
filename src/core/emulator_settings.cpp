@@ -332,6 +332,8 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
             j["Audio"] = m_audio;
             j["GPU"] = m_gpu;
             j["Vulkan"] = m_vulkan;
+            // Windows static guest red-zone protection (também faltava no save global)
+            j["WindowsGuestRedZoneProtection"] = m_windows_guest_red_zone_protection;
 
             // Read the existing file so we can preserve keys unknown to this build
             json existing = json::object();
@@ -394,6 +396,10 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 mergeGroup(m_debug, "Debug");
                 mergeGroup(m_input, "Input");
                 mergeGroup(m_audio, "Audio");
+                // Windows static guest red-zone protection (estava faltando no load global — o
+                // grupo só era lido no caminho game-specific, então a chave no config.json global
+                // era ignorada e o modo ficava sempre Disabled).
+                mergeGroup(m_windows_guest_red_zone_protection, "WindowsGuestRedZoneProtection");
                 mergeGroup(m_gpu, "GPU");
                 mergeGroup(m_vulkan, "Vulkan");
             } else {

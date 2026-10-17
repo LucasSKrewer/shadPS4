@@ -39,6 +39,13 @@ void LoadRenderDoc() {
     // The JSON renderdoc_enabled toggle does not currently reach IsRenderdocEnabled(); allow an
     // explicit env override to load the offline RenderDoc runtime for headless frame captures.
     const bool force_rdoc = std::getenv("SHADPS4_FORCE_RDOC") != nullptr;
+    // SHADPS4_RDOC_DLL=<path to renderdoc.dll> loads a portable (not installed) RenderDoc.
+    if (const char* dll = std::getenv("SHADPS4_RDOC_DLL"); !mod && force_rdoc && dll) {
+        mod = LoadLibraryA(dll);
+        if (!mod) {
+            LOG_ERROR(Render, "Cannot load RenderDoc from {}", dll);
+        }
+    }
     if (!mod && (EmulatorSettings.IsRenderdocEnabled() || force_rdoc)) {
         // If enabled in config, try to load RDoc runtime in offline mode
         HKEY h_reg_key;

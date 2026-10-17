@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
@@ -22,6 +25,10 @@
 #include "shader_recompiler/ir/reg.h"
 #include "shader_recompiler/ir/srt_gvn_table.h"
 #include "shader_recompiler/ir/value.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifdef ARCH_X86_64
 
@@ -88,6 +95,44 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
            operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
 
     size_t len = instruction.length;
+
+#ifdef _WIN32
+    // A fault can be transient (the SRT points at memory that is not set up yet, e.g. while a
+    // match is loading). Patching the load to zero forever then leaves the sharp null for the
+    // rest of the session (MLB The Show 24 crowd textures stayed black). Skip the load just this
+    // time; only patch permanently once the same instruction keeps faulting.
+    {
+        static std::mutex faults_mutex;
+        static std::unordered_map<const void*, u32> fault_counts;
+        constexpr u32 MaxTransientFaults = 4096;
+        u32 count;
+        {
+            std::scoped_lock lock{faults_mutex};
+            count = ++fault_counts[code];
+        }
+        if (count <= MaxTransientFaults) {
+            auto* ctx = reinterpret_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+            switch (operands[0].reg.value) {
+            case ZYDIS_REGISTER_RDI:
+                ctx->Rdi = 0;
+                break;
+            case ZYDIS_REGISTER_R10D:
+                ctx->R10 = 0;
+                break;
+            default:
+                UNREACHABLE_MSG("Unsupported register for SRT walker fault");
+                return false;
+            }
+            ctx->Rip += len;
+            if (count == 1) {
+                LOG_WARNING(Render_Recompiler, "SRT walker fault at {}, address {} (skipped)",
+                            code, fault_address);
+            }
+            return true;
+        }
+    }
+#endif
+
     const size_t patch_size = 3;
     u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
 
@@ -508,6 +553,16 @@ static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
     }
 }
 
+// Element of a per-lane indexed descriptor array that the CPU walker flattens (see ReadLane in
+// ComputeOffset). Element 0 unless SHADPS4_READLANE_INDEX=<n> picks another one.
+static u32 ReadLaneIndex() {
+    static const u32 index = [] {
+        const char* fixed = std::getenv("SHADPS4_READLANE_INDEX");
+        return fixed ? static_cast<u32>(std::strtoul(fixed, nullptr, 10)) : 0u;
+    }();
+    return index;
+}
+
 static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
                           const IR::Value& off_dw) {
     ASSERT(reg != ecx && reg != edx);
@@ -559,6 +614,20 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::BitFieldUExtract:
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
+    case IR::Opcode::ReadLane: {
+        // Waterfall loop over a per-lane descriptor index (e.g. MLB The Show 24 crowd: each
+        // instance picks its T# from an array). The CPU walker has no lane values, so flatten
+        // one fixed element of the array instead of leaving the sharp unresolved (samples black).
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LOG_WARNING(Render_Recompiler,
+                        "Per-lane descriptor index (ReadLane) in SRT offset, using element {}",
+                        ReadLaneIndex());
+        }
+        c.mov(reg, ReadLaneIndex());
+        return true;
+    }
     default:
         LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
                   magic_enum::enum_name(inst->GetOpcode()));
@@ -566,7 +635,8 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     }
 }
 
-static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw) {
+static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw,
+                           bool vsharp_base) {
     c.push(rdi);
     if (off_dw.IsImmediate()) {
         c.mov(rdi, ptr[rdi + (off_dw.U32() << 2)]);
@@ -576,7 +646,9 @@ static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const I
         c.mov(r10d, r10d);
         c.mov(rdi, ptr[rdi + r10]);
     }
-    c.mov(r10, 0xFFFFFFFFFFFFULL);
+    // A V# base address is 40 bits followed by padding (bits 40-47) that the 48-bit pointer mask
+    // kept (MLB The Show 24 crowd: 0x7002... -> faulting reads and null textures).
+    c.mov(r10, vsharp_base ? 0xFFFFFFFFFFULL : 0xFFFFFFFFFFFFULL);
     c.and_(rdi, r10);
     return true;
 }
@@ -593,12 +665,16 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         return;
     }
 
-    if (!PushPtr(c, pass_info, off_dw)) {
+    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
+    ASSERT(use_list);
+    const bool vsharp_base = std::ranges::any_of(*use_list, [](const auto& entry) {
+        return entry.second->GetOpcode() == IR::Opcode::ReadConstBuffer;
+    });
+
+    if (!PushPtr(c, pass_info, off_dw, vsharp_base)) {
         LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
         return;
     }
-    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
-    ASSERT(use_list);
 
     // First copy all the src data from this tree level
     // That way, all data that was contiguous in the guest SRT is also contiguous in the

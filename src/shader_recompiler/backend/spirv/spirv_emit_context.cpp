@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 #include <spirv/unified1/spirv.hpp11>
 
+#include <cstdlib>
 #include <numbers>
 #include <string_view>
 
@@ -37,6 +38,24 @@ std::string_view StageName(HwStage stage) {
         return "cs";
     }
     UNREACHABLE_MSG("Invalid hw stage {}", u32(stage));
+}
+
+// True when the AMD driver is known to feed BaryCoordSmoothCentroidAMD: some interpolated input
+// is centroid-qualified, or SHADPS4_AMD_CENTROID_BARY forces the builtin.
+bool AmdCentroidBaryIsFed(const HwFragmentRuntimeInfo& fs, const Info& info) {
+    static const bool forced = std::getenv("SHADPS4_AMD_CENTROID_BARY") != nullptr;
+    if (forced) {
+        return true;
+    }
+    for (u32 i = 0; i < fs.num_inputs && i < info.fs_interpolation.size(); i++) {
+        const auto [primary, auxiliary] = info.fs_interpolation[i];
+        if (!fs.inputs[i].IsDefault() &&
+            (primary == Qualifier::Smooth || primary == Qualifier::NoPerspective) &&
+            auxiliary == Qualifier::Centroid) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static constexpr u32 NumVertices(AmdGpu::PrimitiveType type) {
@@ -399,7 +418,18 @@ void EmitContext::DefineInputs() {
             }
         }
         if (info.loads.GetAny(IR::Attribute::BaryCoordSmoothCentroid)) {
-            if (profile.supports_amd_shader_explicit_vertex_parameter) {
+            if (profile.supports_amd_shader_explicit_vertex_parameter &&
+                !AmdCentroidBaryIsFed(runtime_info.hw.fs, info)) {
+                // The AMD driver (RDNA4, 32.0.31041) only loads the centroid barycentrics when a
+                // regular input is centroid-qualified. Otherwise BaryCoordSmoothCentroidAMD reads
+                // stale VGPRs and whole waves get garbage (black blocks on the MLB The Show 24
+                // dirt), so use the center barycentrics, which match for fully covered pixels.
+                if (!ValidId(bary_coord_smooth)) {
+                    bary_coord_smooth = DefineVariable(F32[2], spv::BuiltIn::BaryCoordSmoothAMD,
+                                                       spv::StorageClass::Input);
+                }
+                bary_coord_smooth_centroid = bary_coord_smooth;
+            } else if (profile.supports_amd_shader_explicit_vertex_parameter) {
                 bary_coord_smooth_centroid = DefineVariable(
                     F32[2], spv::BuiltIn::BaryCoordSmoothCentroidAMD, spv::StorageClass::Input);
             } else if (profile.supports_fragment_shader_barycentric && !ValidId(bary_coord)) {

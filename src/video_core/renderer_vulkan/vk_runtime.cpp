@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/alignment.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -713,7 +714,14 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         resource->write_ranges.Add(range);
     }
     if (src_access & READ_MASK) {
-        resource->read_ranges.Add(range);
+        // Read ranges only feed conservative overlap checks. Draws read many small ranges of
+        // one huge buffer (all guest GPU memory) between barriers, and keeping each of them
+        // exact made every insert shift a long sorted list. 64 KiB granularity merges them.
+        constexpr u64 ReadGranularity = 64_KB;
+        resource->read_ranges.Add({
+            .start = Common::AlignDown(offset, ReadGranularity),
+            .end = Common::AlignUp(offset + size, ReadGranularity),
+        });
     }
 
     memory_barrier.srcStageMask |= src_stage;

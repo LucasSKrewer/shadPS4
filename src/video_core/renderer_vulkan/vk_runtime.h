@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <map>
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -84,9 +86,50 @@ private:
     Scheduler& scheduler;
     std::unique_ptr<VideoCore::BlitHelper> blit_helper;
     StagingBufferPool staging_pool;
+    // Disjoint byte ranges of a buffer accessed since the last barrier. A sorted vector
+    // (IntervalList) shifted its tail on every insert, which got quadratic when draws touch
+    // thousands of ranges of the buffer that spans all guest GPU memory between barriers.
+    class AccessList {
+    public:
+        void Add(const Interval& range) {
+            u64 start = range.start;
+            u64 end = range.end;
+            if (start >= end) {
+                return;
+            }
+            auto it = ranges.upper_bound(start);
+            if (it != ranges.begin()) {
+                const auto prev = std::prev(it);
+                if (prev->second >= start) {
+                    if (prev->second >= end) {
+                        return;
+                    }
+                    start = prev->first;
+                    ranges.erase(prev);
+                }
+            }
+            while (it != ranges.end() && it->first <= end) {
+                end = std::max(end, it->second);
+                it = ranges.erase(it);
+            }
+            ranges.emplace_hint(it, start, end);
+        }
+        bool Overlaps(u64 start, u64 end) const {
+            auto it = ranges.upper_bound(start);
+            if (it != ranges.begin() && std::prev(it)->second > start) {
+                return true;
+            }
+            return it != ranges.end() && it->first < end;
+        }
+        void Clear() {
+            ranges.clear();
+        }
+
+    private:
+        std::map<u64, u64> ranges; // start -> end
+    };
     struct BufferBarriers {
         const VideoCore::Buffer* handle;
-        using AccessList = IntervalList<Interval>;
         AccessList read_ranges;
         AccessList write_ranges;
     };

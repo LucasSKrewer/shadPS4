@@ -97,6 +97,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::SsaRewritePass(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::ReadLaneEliminationPass(program);
+    Shader::Optimization::WaterfallSharpExpansionPass(program);
     if (info.sw_stage == SwStage::TessellationControl) {
         Shader::Optimization::TessellationPreprocess(program, runtime_info);
         Shader::Optimization::HullShaderTransform(program, runtime_info);

@@ -41,6 +41,9 @@ private:
         switch (inst->GetOpcode()) {
         case IR::Opcode::GetUserData:
         case IR::Opcode::CompositeConstructU32x2:
+        // V# of a ReadConstBuffer: two loads through equal V#s built separately must share a value
+        // number, or only one of them gets a flattened offset.
+        case IR::Opcode::CompositeConstructU32x4:
         case IR::Opcode::ReadConst:
         case IR::Opcode::ReadConstBuffer:
         case IR::Opcode::IAdd32:

@@ -27,6 +27,9 @@ struct PersistentSrtInfo {
     PFN_SrtWalker walker_func{};
     size_t walker_func_size{};
     u32 flattened_bufsize_dw = 16; // NumUserDataRegs
+    // Dwords of the flattened buffer the shader reads; 0 = all of it. Descriptor tables (only
+    // read on the CPU to bind images) live above it and are not uploaded.
+    u32 gpu_bufsize_dw = 0;
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);

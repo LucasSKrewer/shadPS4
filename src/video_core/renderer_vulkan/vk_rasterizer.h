@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+#include <unordered_map>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -156,6 +158,23 @@ private:
         VideoCore::TextureCache::ImageDesc desc;
     };
     std::array<ImageBinding, Shader::NUM_IMAGE_BINDINGS> image_bindings;
+    // Last binding of each descriptor table element, reused while its T# is unchanged.
+    struct TableElementMemo {
+        AmdGpu::Image tsharp{};
+        ImageBinding binding{};
+        u64 image_uid{};
+        AmdGpu::ImageType view_type{};
+        bool is_integer{};
+    };
+    std::vector<TableElementMemo> table_memo;
+    // FindImage results by T# and image flags, valid while the texture cache registry epoch
+    // stays the same (see TextureCache::RegistryEpoch).
+    using TextureMemoKey = std::array<u64, 5>;
+    struct TextureMemoHash {
+        size_t operator()(const TextureMemoKey& key) const noexcept;
+    };
+    std::unordered_map<TextureMemoKey, ImageBinding, TextureMemoHash> texture_memo;
+    u64 texture_memo_epoch{~0ULL};
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     ImageBinding db_desc;
 

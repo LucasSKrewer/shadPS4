@@ -214,6 +214,10 @@ struct PassInfo {
 
     // Bumped during codegen to assign offsets to readconsts
     u16 dst_off_dw;
+    // Descriptor tables are flattened from here up, past what the shader reads, so that part of
+    // the flattened buffer does not have to be uploaded for every draw.
+    static constexpr u32 TableRegionBase = 0x2000;
+    u32 table_off_dw = TableRegionBase;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -732,9 +736,11 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             ASSERT(src_off_dw.IsImmediate() && src_off_dw.U32() < 8);
             if (!table_dst_dw) {
                 const u32 capacity_dw = DescriptorTableCapacity() * 8;
-                table_dst_dw = pass_info.dst_off_dw;
+                table_dst_dw = pass_info.table_off_dw;
                 EmitTableCopy(c, off_dw, *table_dst_dw, capacity_dw);
-                pass_info.dst_off_dw += capacity_dw;
+                pass_info.table_off_dw += capacity_dw;
+                ASSERT_MSG(pass_info.table_off_dw <= std::numeric_limits<SharpLocation>::max(),
+                           "Too many descriptor tables in one shader");
             }
             SetFlatbufOffset(use, *table_dst_dw + src_off_dw.U32());
             continue;
@@ -801,7 +807,14 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
                        info.srt_info.walker_func_size);
     }
 
-    info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+    if (pass_info.table_off_dw > PassInfo::TableRegionBase) {
+        ASSERT_MSG(pass_info.dst_off_dw <= PassInfo::TableRegionBase,
+                   "Flattened user data overlaps the descriptor table region");
+        info.srt_info.gpu_bufsize_dw = pass_info.dst_off_dw;
+        info.srt_info.flattened_bufsize_dw = pass_info.table_off_dw;
+    } else {
+        info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+    }
 }
 
 static bool IsReadConstSource(const IR::Value base) {

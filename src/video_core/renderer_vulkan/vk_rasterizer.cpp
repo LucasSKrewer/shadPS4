@@ -771,7 +771,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), src_access);
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
-                const u32 ubo_size = stage.flattened_ud_buf.size() * sizeof(u32);
+                const u32 gpu_dw = stage.srt_info.gpu_bufsize_dw;
+                const u32 ubo_size =
+                    (gpu_dw ? gpu_dw : stage.flattened_ud_buf.size()) * sizeof(u32);
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
@@ -851,6 +853,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+size_t Rasterizer::TextureMemoHash::operator()(const TextureMemoKey& key) const noexcept {
+    return XXH3_64bits(key.data(), sizeof(key));
+}
+
 // Binds every T# of a per-lane indexed descriptor table as one array element each. Elements whose
 // T# is invalid, or whose view does not match the array's type (taken from element 0 when the
 // shader was compiled), are bound as null.
@@ -859,10 +865,30 @@ void Rasterizer::BindTextureTable(const Shader::Info& stage, const Shader::Image
     const auto first = image_desc.GetSharp(stage, 0);
     const auto view_type = first.GetViewType(image_desc.is_array);
     const bool first_is_integer = AmdGpu::IsInteger(first.GetNumberFmt());
+    if (table_memo.size() < image_desc.table_count) {
+        table_memo.resize(image_desc.table_count);
+    }
     u32 bound{};
     for (u32 element = 0; element < image_desc.table_count; ++element) {
-        auto& [image_id, desc] = image_bindings[num_images++];
+        auto& binding = image_bindings[num_images++];
+        auto& [image_id, desc] = binding;
         const auto tsharp = image_desc.GetSharp(stage, element);
+
+        // The table is the game's global material list and barely changes between draws, so
+        // skip the texture cache lookup while the element's T# and its image are the same.
+        auto& memo = table_memo[element];
+        if (std::memcmp(&memo.tsharp, &tsharp, sizeof(tsharp)) == 0 &&
+            memo.view_type == view_type && memo.is_integer == first_is_integer &&
+            (!memo.binding.image_id ||
+             texture_cache.IsImageAlive(memo.binding.image_id, memo.image_uid))) {
+            binding = memo.binding;
+            if (image_id) {
+                texture_cache.GetImage(image_id).binding.is_bound = 1u;
+                ++bound;
+            }
+            continue;
+        }
+
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         const bool valid = tsharp.Address() != 0 &&
@@ -874,12 +900,19 @@ void Rasterizer::BindTextureTable(const Shader::Info& stage, const Shader::Image
                            AmdGpu::IsInteger(num_fmt) == first_is_integer;
         std::construct_at(&desc, valid ? tsharp : AmdGpu::Image::Null(image_desc.is_depth),
                           image_desc);
+        memo.tsharp = tsharp;
+        memo.view_type = view_type;
+        memo.is_integer = first_is_integer;
         if (!valid) {
             image_id = {};
+            memo.binding = binding;
             continue;
         }
         image_id = texture_cache.FindImage(desc);
-        texture_cache.GetImage(image_id).binding.is_bound = 1u;
+        auto& image = texture_cache.GetImage(image_id);
+        image.binding.is_bound = 1u;
+        memo.binding = binding;
+        memo.image_uid = image.image_uid;
         ++bound;
     }
     static bool logged = false;
@@ -926,6 +959,31 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
 
+        if (mip_fallback_mode == Shader::MipStorageFallbackMode::None) {
+            // Most textures are the same draw after draw: reuse the lookup while no image was
+            // registered or unregistered since it was made.
+            if (texture_memo_epoch != texture_cache.RegistryEpoch()) {
+                texture_memo.clear();
+                texture_memo_epoch = texture_cache.RegistryEpoch();
+            }
+            TextureMemoKey key{};
+            std::memcpy(key.data(), &tsharp, sizeof(tsharp));
+            key[4] = u64(image_desc.is_depth) | u64(image_desc.is_atomic) << 1 |
+                     u64(image_desc.is_array) << 2 | u64(image_desc.is_written) << 3 |
+                     u64(image_desc.is_r128) << 4 | u64(image_desc.post_op) << 8;
+            if (const auto it = texture_memo.find(key); it != texture_memo.end()) {
+                auto& binding = image_bindings[num_images++];
+                binding = it->second;
+                auto& image = texture_cache.GetImage(binding.image_id);
+                if (image.binding.is_bound) {
+                    image.binding.force_general |= image_desc.is_written;
+                }
+                image.binding.is_bound = 1u;
+                image_descriptor_array_sizes.push_back(1);
+                continue;
+            }
+        }
+
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings[num_images++];
             std::construct_at(&desc, tsharp, image_desc);
@@ -953,6 +1011,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 image->binding.force_general |= image_desc.is_written;
             }
             image->binding.is_bound = 1u;
+        }
+
+        if (mip_fallback_mode == Shader::MipStorageFallbackMode::None) {
+            // The lookup may itself have registered an image, invalidating older entries.
+            if (texture_memo_epoch != texture_cache.RegistryEpoch()) {
+                texture_memo.clear();
+                texture_memo_epoch = texture_cache.RegistryEpoch();
+            }
+            TextureMemoKey key{};
+            std::memcpy(key.data(), &tsharp, sizeof(tsharp));
+            key[4] = u64(image_desc.is_depth) | u64(image_desc.is_atomic) << 1 |
+                     u64(image_desc.is_array) << 2 | u64(image_desc.is_written) << 3 |
+                     u64(image_desc.is_r128) << 4 | u64(image_desc.post_op) << 8;
+            texture_memo[key] = image_bindings[num_images - 1];
         }
 
         image_descriptor_array_sizes.push_back(num_bindings);

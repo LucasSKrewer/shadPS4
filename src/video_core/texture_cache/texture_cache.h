@@ -140,6 +140,21 @@ public:
     /// Links the stencil plane of a depth surface to its depth image.
     void AssociateStencil(ImageId depth_id, const ImageInfo& depth_info);
 
+    /// Bumped whenever an image is registered or unregistered. A FindImage result stays valid
+    /// while it is unchanged, since only those events change which image a lookup returns.
+    [[nodiscard]] u64 RegistryEpoch() const noexcept {
+        return registry_epoch;
+    }
+
+    /// Whether a previously found image id still refers to the same registered image.
+    [[nodiscard]] bool IsImageAlive(ImageId image_id, u64 image_uid) {
+        if (!image_id || !slot_images.IsAllocated(image_id)) {
+            return false;
+        }
+        const Image& image = slot_images[image_id];
+        return image.image_uid == image_uid && True(image.flags & ImageFlagBits::Registered);
+    }
+
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
         Image& image = slot_images[image_id];
@@ -394,6 +409,7 @@ private:
     PageManager& tracker;
     PageTable page_table;
     Common::SlotVector<Image> slot_images;
+    u64 registry_epoch{};
     Common::SlotVector<ImageView> slot_image_views;
     Common::SlotVector<Sampler> slot_samplers;
     BlitHelper blit_helper;

@@ -307,8 +307,13 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        bool is_table = false;
+        u32 table_count = 0;
         MipStorageFallbackMode mip_fallback_mode{};
     };
+
+    // Index set by the last ImageTableIndex, used by the next sample of a table image.
+    Id image_table_index{};
 
     enum class PointerType : u32 {
         U8,

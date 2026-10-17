@@ -110,6 +110,7 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::SharedAtomicCmpSwap32:
     case Opcode::SharedAtomicCmpSwap64:
     case Opcode::ImageWrite:
+    case Opcode::ImageTableIndex:
     case Opcode::ImageAtomicIAdd32:
     case Opcode::ImageAtomicSMin32:
     case Opcode::ImageAtomicUMin32:

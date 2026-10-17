@@ -417,6 +417,8 @@ bool Instance::CreateDevice() {
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
+                .shaderSampledImageArrayDynamicIndexing =
+                    features.shaderSampledImageArrayDynamicIndexing,
                 .shaderClipDistance = features.shaderClipDistance,
                 .shaderFloat64 = features.shaderFloat64,
                 .shaderInt64 = features.shaderInt64,
@@ -437,6 +439,8 @@ bool Instance::CreateDevice() {
             .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
             .shaderFloat16 = vk12_features.shaderFloat16,
             .shaderInt8 = vk12_features.shaderInt8,
+            .shaderSampledImageArrayNonUniformIndexing =
+                vk12_features.shaderSampledImageArrayNonUniformIndexing,
             .scalarBlockLayout = vk12_features.scalarBlockLayout,
             .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
             .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,

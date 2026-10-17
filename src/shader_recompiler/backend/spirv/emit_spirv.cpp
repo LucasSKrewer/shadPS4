@@ -298,6 +298,10 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     if (info.uses_lane_id) {
         ctx.AddCapability(spv::Capability::GroupNonUniform);
     }
+    if (std::ranges::any_of(info.images, [](const auto& image) { return image.table_count; })) {
+        ctx.AddCapability(spv::Capability::ShaderNonUniform);
+        ctx.AddCapability(spv::Capability::SampledImageArrayNonUniformIndexing);
+    }
     if (info.uses_group_quad) {
         ctx.AddCapability(spv::Capability::GroupNonUniformQuad);
     }

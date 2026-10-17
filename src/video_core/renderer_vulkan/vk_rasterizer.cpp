@@ -851,6 +851,45 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+// Binds every T# of a per-lane indexed descriptor table as one array element each. Elements whose
+// T# is invalid, or whose view does not match the array's type (taken from element 0 when the
+// shader was compiled), are bound as null.
+void Rasterizer::BindTextureTable(const Shader::Info& stage, const Shader::ImageResource& image_desc,
+                                  u32& num_images) {
+    const auto first = image_desc.GetSharp(stage, 0);
+    const auto view_type = first.GetViewType(image_desc.is_array);
+    const bool first_is_integer = AmdGpu::IsInteger(first.GetNumberFmt());
+    u32 bound{};
+    for (u32 element = 0; element < image_desc.table_count; ++element) {
+        auto& [image_id, desc] = image_bindings[num_images++];
+        const auto tsharp = image_desc.GetSharp(stage, element);
+        const auto data_fmt = tsharp.GetDataFmt();
+        const auto num_fmt = tsharp.GetNumberFmt();
+        const bool valid = tsharp.Address() != 0 &&
+                           data_fmt != AmdGpu::DataFormat::FormatInvalid &&
+                           magic_enum::enum_contains(data_fmt) &&
+                           magic_enum::enum_contains(num_fmt) &&
+                           memory->IsValidGpuMapping(tsharp.Address(), 0) &&
+                           tsharp.GetViewType(image_desc.is_array) == view_type &&
+                           AmdGpu::IsInteger(num_fmt) == first_is_integer;
+        std::construct_at(&desc, valid ? tsharp : AmdGpu::Image::Null(image_desc.is_depth),
+                          image_desc);
+        if (!valid) {
+            image_id = {};
+            continue;
+        }
+        image_id = texture_cache.FindImage(desc);
+        texture_cache.GetImage(image_id).binding.is_bound = 1u;
+        ++bound;
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "Descriptor table: {} of {} T#s bound", bound,
+                 image_desc.table_count);
+    }
+}
+
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const u32 first_image_idx = image_infos.size();
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
@@ -858,6 +897,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     u32 num_images{};
     for (const auto& image_desc : stage.images) {
+        if (image_desc.table_count) {
+            BindTextureTable(stage, image_desc, num_images);
+            image_descriptor_array_sizes.push_back(image_desc.table_count);
+            continue;
+        }
         const auto tsharp = image_desc.GetSharp(stage);
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();

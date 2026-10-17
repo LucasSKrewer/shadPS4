@@ -116,7 +116,7 @@ public:
             return desc.sharp_fetch == existing.sharp_fetch && desc.is_array == existing.is_array &&
                    desc.mip_fallback_mode == existing.mip_fallback_mode &&
                    desc.constant_mip_index == existing.constant_mip_index &&
-                   desc.post_op == existing.post_op;
+                   desc.post_op == existing.post_op && desc.table_count == existing.table_count;
         })};
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
@@ -248,6 +248,13 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .is_r128 = bool(inst_info.is_r128),
         .post_op = resource.sharps[0].post_op,
     };
+    if (const IR::Value dword0 = resource.sharps[0].dwords[0]; !dword0.IsImmediate()) {
+        const IR::Inst* const load = dword0.Inst();
+        if (load->GetOpcode() == IR::Opcode::ReadConstBuffer &&
+            load->Flags<IR::BufferInstInfo>().table_element) {
+            image_res.table_count = static_cast<u16>(DescriptorTableCapacity());
+        }
+    }
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);

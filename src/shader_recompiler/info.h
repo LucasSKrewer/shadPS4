@@ -162,6 +162,11 @@ struct Info : InfoPersistent {
     void AddBindings(Backend::Bindings& bnd) const {
         bnd.buffer += buffers.size();
         bnd.unified += buffers.size() + images.size() + samplers.size();
+        for (const auto& image : images) {
+            if (image.table_count) {
+                bnd.unified += image.table_count - 1;
+            }
+        }
     }
 
     void RefreshFlatBuf() {

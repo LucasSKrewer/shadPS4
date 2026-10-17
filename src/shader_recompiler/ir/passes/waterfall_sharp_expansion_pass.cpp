@@ -11,32 +11,36 @@
 #include "common/logging/log.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/resource.h"
 
 // Waterfall loops that pick a T# per lane from a descriptor array (v_readlane of a per-lane
 // index, then s_buffer_load of the T# at index * 32 bytes) cannot be flattened by the CPU SRT
 // walker, which has no lane values. MLB The Show 24 draws its crowd this way: every instance
-// picks its albedo/normal textures from an array, so with a single flattened element the whole
-// crowd shared one texture. This pass expands such a sample into one sample per array element
-// 0..N-1 (each with a constant offset, which the walker handles) and selects the result that
-// matches the lane's index. Indices >= N fall back to element 0.
+// picks its albedo/normal textures from a global material table. This pass points such a sample
+// at element 0 of the table (constant offsets, loads tagged as table_element), and puts the
+// lane's index in an ImageTableIndex right before it. The SRT walker then copies the whole table,
+// the image becomes a descriptor array of DescriptorTableCapacity() elements, and the SPIR-V
+// sample indexes it with that value.
+
+namespace Shader {
+
+u32 DescriptorTableCapacity() {
+    static const u32 capacity = [] {
+        constexpr u32 Default = 1024;
+        constexpr u32 Max = 4096 - NUM_IMAGES;
+        if (const char* env = std::getenv("SHADPS4_DESC_TABLE_SIZE")) {
+            return std::clamp<u32>(static_cast<u32>(std::strtoul(env, nullptr, 10)), 1, Max);
+        }
+        return Default;
+    }();
+    return capacity;
+}
+
+} // namespace Shader
 
 namespace Shader::Optimization {
 
 namespace {
-
-constexpr u32 DefaultElements = 8;
-constexpr u32 MaxElements = 32;
-
-u32 NumElements() {
-    static const u32 num = [] {
-        if (const char* env = std::getenv("SHADPS4_WATERFALL_ELEMENTS")) {
-            const u32 value = static_cast<u32>(std::strtoul(env, nullptr, 10));
-            return std::clamp<u32>(value, 1, MaxElements);
-        }
-        return DefaultElements;
-    }();
-    return num;
-}
 
 bool IsOffsetArithmetic(IR::Opcode op) {
     switch (op) {
@@ -172,47 +176,24 @@ void Expand(const WaterfallSample& match) {
     IR::Inst* const sample = match.sample;
     IR::Block* const block = sample->GetParent();
     const auto it = IR::Block::InstructionList::s_iterator_to(*sample);
-    const u32 num_elements = NumElements();
 
-    IR::Value result{};
-    for (u32 element = 0; element < num_elements; ++element) {
-        CloneMap clones;
-        std::array<IR::Value, 8> dwords;
-        for (u32 i = 0; i < 8; ++i) {
-            IR::Inst* const load = &*block->PrependNewInst(it, *match.dwords[i]);
-            load->SetArg(1, CloneWithElement(block, it, match.dwords[i]->Arg(1), match.read_lane,
-                                             element, clones));
-            dwords[i] = IR::Value{load};
-        }
-        const IR::Value lo{&*block->PrependNewInst(
-            it, IR::Opcode::CompositeConstructU32x4, {dwords[0], dwords[1], dwords[2], dwords[3]})};
-        const IR::Value hi{&*block->PrependNewInst(
-            it, IR::Opcode::CompositeConstructU32x4, {dwords[4], dwords[5], dwords[6], dwords[7]})};
-        const IR::Value handle{&*block->PrependNewInst(it, IR::Opcode::ImageHandle, {lo, hi})};
-        IR::Inst* const element_sample = &*block->PrependNewInst(it, *sample);
-        element_sample->SetArg(0, handle);
-        const IR::Value element_value{element_sample};
-
-        if (element == 0) {
-            result = element_value;
-            continue;
-        }
-        const IR::Value is_element{&*block->PrependNewInst(
-            it, IR::Opcode::IEqual32, {IR::Value{match.read_lane}, IR::Value{element}})};
-        std::array<IR::Value, 4> components;
-        for (u32 c = 0; c < 4; ++c) {
-            const IR::Value from_element{&*block->PrependNewInst(
-                it, IR::Opcode::CompositeExtractF32x4, {element_value, IR::Value{c}})};
-            const IR::Value from_previous{&*block->PrependNewInst(
-                it, IR::Opcode::CompositeExtractF32x4, {result, IR::Value{c}})};
-            components[c] = IR::Value{&*block->PrependNewInst(
-                it, IR::Opcode::SelectF32, {is_element, from_element, from_previous})};
-        }
-        result = IR::Value{&*block->PrependNewInst(
-            it, IR::Opcode::CompositeConstructF32x4,
-            {components[0], components[1], components[2], components[3]})};
+    CloneMap clones;
+    std::array<IR::Value, 8> dwords;
+    for (u32 i = 0; i < 8; ++i) {
+        IR::Inst* const load = &*block->PrependNewInst(it, *match.dwords[i]);
+        load->SetArg(1, CloneWithElement(block, it, match.dwords[i]->Arg(1), match.read_lane, 0,
+                                         clones));
+        auto load_info = load->Flags<IR::BufferInstInfo>();
+        load_info.table_element.Assign(1);
+        load->SetFlags(load_info);
+        dwords[i] = IR::Value{load};
     }
-    sample->ReplaceUsesWith(result);
+    const IR::Value lo{&*block->PrependNewInst(
+        it, IR::Opcode::CompositeConstructU32x4, {dwords[0], dwords[1], dwords[2], dwords[3]})};
+    const IR::Value hi{&*block->PrependNewInst(
+        it, IR::Opcode::CompositeConstructU32x4, {dwords[4], dwords[5], dwords[6], dwords[7]})};
+    sample->SetArg(0, IR::Value{&*block->PrependNewInst(it, IR::Opcode::ImageHandle, {lo, hi})});
+    block->PrependNewInst(it, IR::Opcode::ImageTableIndex, {IR::Value{match.read_lane}});
 }
 
 } // Anonymous namespace
@@ -230,8 +211,9 @@ void WaterfallSharpExpansionPass(IR::Program& program) {
         Expand(match);
     }
     if (!matches.empty()) {
-        LOG_INFO(Render_Recompiler, "Expanded {} waterfall descriptor sample(s) into {} elements",
-                 matches.size(), NumElements());
+        LOG_INFO(Render_Recompiler,
+                 "{} waterfall descriptor sample(s) now index a table of {} T#s", matches.size(),
+                 DescriptorTableCapacity());
     }
 }
 

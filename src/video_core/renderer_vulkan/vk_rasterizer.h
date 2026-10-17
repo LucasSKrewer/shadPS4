@@ -121,6 +121,8 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
+    void BindTextureTable(const Shader::Info& stage, const Shader::ImageResource& image_desc,
+                          u32& num_images);
     bool BindResources(const Pipeline* pipeline);
 
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
@@ -153,11 +155,11 @@ private:
         VideoCore::ImageId image_id;
         VideoCore::TextureCache::ImageDesc desc;
     };
-    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    std::array<ImageBinding, Shader::NUM_IMAGE_BINDINGS> image_bindings;
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     ImageBinding db_desc;
 
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGE_BINDINGS> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
 
     struct BoundBuffer {

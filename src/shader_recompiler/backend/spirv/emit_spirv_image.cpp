@@ -135,8 +135,41 @@ struct ImageOperands {
     boost::container::static_vector<Id, 4> operands;
 };
 
+// Images that are a per-lane indexed descriptor table are arrays, indexed by the value of the
+// ImageTableIndex that precedes the sample. The index varies between lanes, so it is NonUniform.
+static Id LoadTexture(EmitContext& ctx, const EmitContext::TextureDefinition& texture) {
+    if (!texture.is_table) {
+        return ctx.OpLoad(texture.image_type, texture.id);
+    }
+    ASSERT_MSG(Sirit::ValidId(ctx.image_table_index), "Table image sampled without an index");
+    // Indexing past the array is undefined (garbage descriptors, NaNs that bloom spreads), so
+    // clamp to the last element, which the SRT walker clears when the guest table is smaller.
+    const Id index =
+        ctx.OpUMin(ctx.U32[1], ctx.image_table_index, ctx.ConstU32(texture.table_count - 1));
+    ctx.Decorate(index, spv::Decoration::NonUniform);
+    const Id pointer_type = ctx.TypePointer(spv::StorageClass::UniformConstant, texture.image_type);
+    const Id pointer = ctx.OpAccessChain(pointer_type, texture.id, index);
+    ctx.Decorate(pointer, spv::Decoration::NonUniform);
+    const Id image = ctx.OpLoad(texture.image_type, pointer);
+    ctx.Decorate(image, spv::Decoration::NonUniform);
+    return image;
+}
+
+static Id SampleTexture(EmitContext& ctx, const EmitContext::TextureDefinition& texture, Id image,
+                        Id sampler) {
+    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    if (texture.is_table) {
+        ctx.Decorate(sampled_image, spv::Decoration::NonUniform);
+    }
+    return sampled_image;
+}
+
 Id EmitImageHandle(EmitContext& ctx, Id, Id) {
     UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitImageTableIndex(EmitContext& ctx, Id index) {
+    ctx.image_table_index = index;
 }
 
 Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1, Id address2,
@@ -147,10 +180,10 @@ Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1,
 Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id bias,
                               const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
@@ -163,10 +196,10 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
 Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod,
                               const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
@@ -179,10 +212,10 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
 Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id bias, const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(1);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Bias, bias);
@@ -197,10 +230,10 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
 Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id dref,
                                   Id lod, const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(1);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.Add(spv::ImageOperandsMask::Lod, lod);
@@ -215,10 +248,10 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
 Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
                    const IR::Value& offset) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     const u32 comp = inst->Flags<IR::TextureInstInfo>().gather_comp.Value();
     ImageOperands operands;
@@ -231,10 +264,10 @@ Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
 Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
                        const IR::Value& offset, Id dref) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.AddOffset(ctx, texture.view_type, offset, true);
@@ -245,7 +278,7 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
 
 Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod, bool has_mips) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id zero = ctx.u32_zero_value;
     const auto mips{[&] { return has_mips ? ctx.OpImageQueryLevels(ctx.U32[1], image) : zero; }};
     const bool uses_lod{texture.view_type != AmdGpu::ImageType::Color2DMsaa && !texture.is_storage};
@@ -278,9 +311,9 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod
 
 Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     return ctx.OpImageQueryLod(ctx.F32[2], sampled_image, fixed_coords);
 }
@@ -288,10 +321,10 @@ Id EmitImageQueryLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords) {
 Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id derivatives_dx,
                      Id derivatives_dy, const IR::Value& offset, const IR::Value& lod_clamp) {
     const auto& texture = ctx.images[handle & 0xFFFF];
-    const Id image = ctx.OpLoad(texture.image_type, texture.id);
+    const Id image = LoadTexture(ctx, texture);
     const Id result_type = texture.data_types->Get(4);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
-    const Id sampled_image = ctx.OpSampledImage(texture.sampled_type, image, sampler);
+    const Id sampled_image = SampleTexture(ctx, texture, image, sampler);
     const Id fixed_coords = FixImageCoords<true>(ctx, coords, texture.view_type);
     ImageOperands operands;
     operands.AddDerivatives(ctx, texture.view_type, derivatives_dx, derivatives_dy);
@@ -308,7 +341,7 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
     ImageOperands operands;
     Id texel;
     if (!texture.is_storage) {
-        const Id image = ctx.OpLoad(texture.image_type, texture.id);
+        const Id image = LoadTexture(ctx, texture);
         if (texture.view_type == AmdGpu::ImageType::Color2DMsaa) {
             // GCN hardware wraps out-of-range MSAA sample indices
             if (Sirit::ValidId(ms)) {

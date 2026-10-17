@@ -657,6 +657,51 @@ static inline void PopPtr(Xbyak::CodeGenerator& c) {
     c.pop(rdi);
 }
 
+static bool IsTableElementLoad(const IR::Inst* inst) {
+    return inst->GetOpcode() == IR::Opcode::ReadConstBuffer &&
+           inst->Flags<IR::BufferInstInfo>().table_element;
+}
+
+// Copies a whole T# table read through the V# that rdi points at (see WaterfallSharpExpansionPass)
+// to the flattened buffer at dst_dw, bounded by the V#'s num_records when it is known, and clears
+// the rest of the reserved slots so stale T#s from another draw are never bound.
+static void EmitTableCopy(Xbyak::CodeGenerator& c, const IR::Value& vsharp_off_dw, u32 dst_dw,
+                          u32 capacity_dw) {
+    c.mov(ecx, capacity_dw);
+    if (vsharp_off_dw.IsImmediate()) {
+        // PushPtr left the pointer holding the V# on the stack. The table size in bytes is
+        // num_records (dword 2), times the stride (dword 1 bits 16-29) when that is not zero.
+        Xbyak::Label no_stride;
+        c.mov(r11, ptr[rsp]);
+        c.mov(edx, dword[r11 + ((vsharp_off_dw.U32() + 2) << 2)]);
+        c.mov(r10d, dword[r11 + ((vsharp_off_dw.U32() + 1) << 2)]);
+        c.shr(r10d, 16);
+        c.and_(r10d, 0x3FFF);
+        c.jz(no_stride);
+        c.imul(rdx, r10);
+        c.L(no_stride);
+        c.shr(rdx, 2);
+        c.cmp(rdx, rcx);
+        c.cmovb(rcx, rdx);
+    }
+    Xbyak::Label copy_loop, clear_loop, done;
+    c.xor_(edx, edx);
+    c.L(copy_loop);
+    c.cmp(edx, ecx);
+    c.jae(clear_loop);
+    c.mov(r10d, dword[rdi + rdx * 4]);
+    c.mov(dword[rsi + rdx * 4 + (dst_dw << 2)], r10d);
+    c.inc(edx);
+    c.jmp(copy_loop);
+    c.L(clear_loop);
+    c.cmp(edx, capacity_dw);
+    c.jae(done);
+    c.mov(dword[rsi + rdx * 4 + (dst_dw << 2)], 0);
+    c.inc(edx);
+    c.jmp(clear_loop);
+    c.L(done);
+}
+
 static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& pass_info,
                          Xbyak::CodeGenerator& c) {
     if (subtree->GetOpcode() == IR::Opcode::ReadConst && subtree->Flags<u16>() == 0 ||
@@ -681,7 +726,19 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // flattened buffer.
     // TODO src and dst are contiguous. Optimize with wider loads/stores
     // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
+    std::optional<u32> table_dst_dw;
     for (auto [src_off_dw, use] : *use_list) {
+        if (IsTableElementLoad(use)) {
+            ASSERT(src_off_dw.IsImmediate() && src_off_dw.U32() < 8);
+            if (!table_dst_dw) {
+                const u32 capacity_dw = DescriptorTableCapacity() * 8;
+                table_dst_dw = pass_info.dst_off_dw;
+                EmitTableCopy(c, off_dw, *table_dst_dw, capacity_dw);
+                pass_info.dst_off_dw += capacity_dw;
+            }
+            SetFlatbufOffset(use, *table_dst_dw + src_off_dw.U32());
+            continue;
+        }
         if (src_off_dw.IsImmediate()) {
             c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
         } else {

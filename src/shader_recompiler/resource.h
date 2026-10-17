@@ -16,6 +16,11 @@ static constexpr u32 NUM_IMAGES = 64;
 static constexpr u32 NUM_BUFFERS = 56;
 static constexpr u32 NUM_SAMPLERS = 16;
 static constexpr u32 NUM_FMASKS = 8;
+// Image descriptors one stage can bind, counting every element of descriptor arrays.
+static constexpr u32 NUM_IMAGE_BINDINGS = 4096;
+
+// T# slots reserved for a per-lane indexed descriptor table (SHADPS4_DESC_TABLE_SIZE overrides).
+u32 DescriptorTableCapacity();
 
 using SharpLocation = u16;
 
@@ -41,9 +46,9 @@ struct SharpFetch {
 
     template <u32 num_dwords = N>
         requires(num_dwords <= N)
-    constexpr bool Fetch(const u32* flatbuf, T* out) const {
+    constexpr bool Fetch(const u32* flatbuf, T* out, u32 dw_shift = 0) const {
         if (summary == Summary::SingleLoad) [[likely]] {
-            std::memcpy(out, flatbuf + offsets[0], num_dwords * sizeof(u32));
+            std::memcpy(out, flatbuf + offsets[0] + dw_shift, num_dwords * sizeof(u32));
             return true;
         } else if (summary == Summary::Invalid) [[unlikely]] {
             return false;
@@ -51,7 +56,7 @@ struct SharpFetch {
         u8 mask = load_mask;
         std::array<u32, num_dwords> out_dw;
         for (u32 i = 0; i < num_dwords; i++) {
-            out_dw[i] = (mask & 1) ? flatbuf[offsets[i]] : immediates[i];
+            out_dw[i] = (mask & 1) ? flatbuf[offsets[i] + dw_shift] : immediates[i];
             mask >>= 1;
         }
         std::memcpy(out, out_dw.data(), sizeof(out_dw));
@@ -135,10 +140,13 @@ struct ImageResource {
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
+    // Number of T#s in a per-lane indexed descriptor table (0 = plain image). Element i is
+    // flattened right after element i-1, 8 dwords apart, and bound as array element i.
+    u16 table_count{};
 
-    constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
+    constexpr AmdGpu::Image GetSharp(const auto& info, u32 table_element = 0) const noexcept {
         AmdGpu::Image image{};
-        if (!Fetch(info.flattened_ud_buf.data(), &image)) {
+        if (!Fetch(info.flattened_ud_buf.data(), &image, table_element * 8)) {
             return AmdGpu::Image::Null(is_depth);
         }
         if (post_op == SharpFetchPostOp::ConvertCubeTo2DArray) {
@@ -157,13 +165,13 @@ struct ImageResource {
         return image;
     }
 
-    constexpr bool Fetch(const u32* flatbuf, AmdGpu::Image* out) const {
+    constexpr bool Fetch(const u32* flatbuf, AmdGpu::Image* out, u32 dw_shift = 0) const {
         if (!is_r128) {
             // Fetch full 8 byte T#
-            return sharp_fetch.Fetch(flatbuf, out);
+            return sharp_fetch.Fetch(flatbuf, out, dw_shift);
         }
         // Fetch r128 T# and fix pitch
-        if (!sharp_fetch.Fetch<4>(flatbuf, out)) {
+        if (!sharp_fetch.Fetch<4>(flatbuf, out, dw_shift)) {
             return false;
         }
         out->pitch = out->width;
@@ -171,6 +179,9 @@ struct ImageResource {
     }
 
     u32 NumBindings(const auto& info) const {
+        if (table_count) {
+            return table_count;
+        }
         const AmdGpu::Image tsharp = GetSharp(info);
         return (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex)
                    ? (tsharp.last_level - tsharp.base_level + 1)

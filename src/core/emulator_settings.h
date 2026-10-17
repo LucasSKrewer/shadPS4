@@ -34,6 +34,9 @@ enum GpuReadbacksMode : int {
     Disabled,
     Relaxed,
     Precise,
+    // Precise for the guest threads, but a page that faults on the GPU command processor thread
+    // is downloaded once and never read-protected again (those reads are what made Precise slow).
+    Selective,
 };
 
 enum class ConfigMode {

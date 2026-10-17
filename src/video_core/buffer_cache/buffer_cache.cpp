@@ -117,6 +117,60 @@ void BufferCache::TickFrame() {
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
+    DownloadHotPages();
+}
+
+void BufferCache::MarkHotReadbackPage(VAddr device_addr) {
+    const VAddr page = Common::AlignDown(device_addr, 4_KB);
+    {
+        std::scoped_lock lk{hot_pages_mutex};
+        if (std::ranges::find(hot_pages, page) != hot_pages.end()) {
+            return;
+        }
+        hot_pages.push_back(page);
+    }
+    memory_tracker->ExcludeFromReadbacks(page);
+    LOG_INFO(Render_Vulkan, "Selective readbacks: page {:#x} is now mirrored asynchronously", page);
+}
+
+void BufferCache::DownloadHotPages() {
+    std::vector<VAddr> pages;
+    {
+        std::scoped_lock lk{hot_pages_mutex};
+        pages = hot_pages;
+    }
+    for (const VAddr page : pages) {
+        boost::container::small_vector<vk::BufferCopy, 4> copies;
+        u64 total_size_bytes = 0;
+        const auto* arena = GetArena(page >> block_shift, (page + 4_KB - 1) >> block_shift);
+        const VAddr arena_base = arena->cpu_addr;
+        gpu_modified_ranges.ForEachInRange(page, 4_KB, [&](VAddr start, VAddr end) {
+            copies.push_back(vk::BufferCopy{
+                .srcOffset = start - arena_base,
+                .dstOffset = total_size_bytes,
+                .size = end - start,
+            });
+            total_size_bytes += Common::AlignUp(end - start, 64);
+        });
+        if (total_size_bytes == 0) {
+            continue;
+        }
+        const auto download =
+            staging_pool.Request(total_size_bytes, MemoryType::HostCached, 0, true);
+        for (auto& copy : copies) {
+            copy.dstOffset += download.offset;
+        }
+        runtime.CopyBuffer(arena, download.buffer, copies);
+        scheduler.DeferPriorityOperation([this, arena_base, copies, download] {
+            download.Invalidate();
+            for (const auto& copy : copies) {
+                memory->TryWriteBacking(std::bit_cast<u8*>(arena_base + copy.srcOffset),
+                                        download.mapped + (copy.dstOffset - download.offset),
+                                        copy.size);
+            }
+            staging_pool.FreeDeferred(download);
+        });
+    }
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
@@ -220,6 +274,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
     memory->CopySparseMemory(device_addr, staging.mapped, staging.size);
     staging.Flush();
     return {staging.buffer, staging.offset};
+}
+
+void BufferCache::ExcludeFromReadbacks(VAddr device_addr) {
+    memory_tracker->ExcludeFromReadbacks(device_addr);
 }
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {

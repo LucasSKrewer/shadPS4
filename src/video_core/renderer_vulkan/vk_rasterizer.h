@@ -122,6 +122,7 @@ private:
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
+    void WatchBufferBinding(u64 pgm_hash, u32 binding, VAddr address, u64 size, bool is_written);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     void BindTextureTable(const Shader::Info& stage, const Shader::ImageResource& image_desc,
                           u32& num_images);

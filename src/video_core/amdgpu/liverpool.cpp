@@ -411,7 +411,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                const auto* dwords = reinterpret_cast<const u32*>(header);
+                last_predication = {dwords[1], dwords[2]};
+                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION {:08x} {:08x}", dwords[1],
+                            dwords[2]);
                 break;
             }
             case PM4ItOpcode::IndexType: {

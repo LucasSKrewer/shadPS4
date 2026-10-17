@@ -154,6 +154,9 @@ public:
     }
 #endif
 
+    /// Raw dwords 1-2 of the last IT_SET_PREDICATION (still ignored), for debug logs.
+    std::array<u32, 2> last_predication{};
+
 private:
     struct Task {
         struct promise_type {

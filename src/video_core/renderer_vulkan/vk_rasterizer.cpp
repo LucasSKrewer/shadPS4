@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -755,6 +760,67 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     return true;
 }
 
+// SHADPS4_VIGIAR_PS=<hash hex>[,<hash hex>...] logs the guest buffers bound to those shaders
+// (address, size, GPU-modified state, first dwords of guest memory) and every later shader write
+// that overlaps one of them. Debug aid for constants that come out wrong (MLB The Show 24 ball).
+void Rasterizer::WatchBufferBinding(u64 pgm_hash, u32 binding, VAddr address, u64 size,
+                                    bool is_written) {
+    struct Watch {
+        std::vector<u64> hashes;
+        std::vector<std::pair<VAddr, u64>> ranges;
+        std::array<std::array<u32, 14>, 32> last{};
+        u32 logs = 0;
+    };
+    static Watch watch = [] {
+        Watch w;
+        if (const char* env = std::getenv("SHADPS4_VIGIAR_PS")) {
+            for (const char* p = env; *p;) {
+                char* end;
+                w.hashes.push_back(std::strtoull(p, &end, 16));
+                p = *end ? end + 1 : end;
+            }
+        }
+        return w;
+    }();
+    if (watch.hashes.empty() || watch.logs > 5000) {
+        return;
+    }
+    if (std::ranges::find(watch.hashes, pgm_hash) != watch.hashes.end()) {
+        if (std::ranges::find(watch.ranges, std::pair{address, size}) == watch.ranges.end() &&
+            watch.ranges.size() < 64) {
+            watch.ranges.emplace_back(address, size);
+        }
+        std::array<u32, 14> dw{};
+        memory->CopySparseMemory(address, reinterpret_cast<u8*>(dw.data()),
+                                 std::min<u64>(size, 12 * sizeof(u32)));
+        dw[12] = liverpool->last_predication[0];
+        dw[13] = liverpool->last_predication[1];
+        if (binding < watch.last.size()) {
+            if (watch.last[binding] == dw) {
+                return;
+            }
+            watch.last[binding] = dw;
+        }
+        ++watch.logs;
+        LOG_WARNING(Render_Vulkan,
+                    "vigia ps {:#x} buf {} addr {:#x} size {} written {} gpu_mod {} dw {:08x} "
+                    "{:08x} {:08x} {:08x} | {:08x} {:08x} {:08x} {:08x} | {:08x} {:08x} {:08x} "
+                    "{:08x} | ultima predicacao {:08x} {:08x}",
+                    pgm_hash, binding, address, size, is_written,
+                    buffer_cache.IsRegionGpuModified(address, size), dw[0], dw[1], dw[2], dw[3],
+                    dw[4], dw[5], dw[6], dw[7], dw[8], dw[9], dw[10], dw[11], dw[12], dw[13]);
+    } else if (is_written) {
+        for (const auto& [start, len] : watch.ranges) {
+            if (address < start + len && start < address + size) {
+                ++watch.logs;
+                LOG_WARNING(Render_Vulkan,
+                            "vigia escrita GPU por {:#x} buf {} em {:#x}+{} sobre {:#x}+{}",
+                            pgm_hash, binding, address, size, start, len);
+            }
+        }
+    }
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
@@ -823,6 +889,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
+                WatchBufferBinding(stage.pgm_hash, binding.buffer, vsharp.base_address, size,
+                                   desc.is_written);
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
@@ -1386,7 +1454,35 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
+    // SHADPS4_LOG_READBACKS logs every page the guest reads back from GPU-modified memory, once
+    // per page, to find which ranges actually need readbacks.
+    static const bool log_readbacks = std::getenv("SHADPS4_LOG_READBACKS") != nullptr;
+    if (log_readbacks) {
+        static std::mutex log_mutex;
+        static std::unordered_map<VAddr, u64> pages;
+        std::scoped_lock lk{log_mutex};
+        const u64 count = ++pages[addr >> 12];
+        if (count == 1 || (count & (count - 1)) == 0) {
+            LOG_WARNING(Render_Vulkan, "readback pagina {:#x} addr {:#x} size {} gpu_thread {} vezes {}",
+                        addr >> 12 << 12, addr, size, assume_locks, count);
+        }
+    }
     buffer_cache.ReadMemory(addr, size, false, assume_locks);
+    // assume_locks means the fault came from the GPU command processor thread itself.
+    if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Selective) {
+        if (assume_locks) {
+            buffer_cache.ExcludeFromReadbacks(addr);
+        } else {
+            static constexpr u32 HotPageFaults = 8;
+            static std::mutex hot_mutex;
+            static std::unordered_map<VAddr, u32> guest_faults;
+            std::unique_lock lk{hot_mutex};
+            if (++guest_faults[addr >> 12] == HotPageFaults) {
+                lk.unlock();
+                buffer_cache.MarkHotReadbackPage(addr);
+            }
+        }
+    }
     return true;
 }
 

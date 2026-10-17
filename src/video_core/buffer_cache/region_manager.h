@@ -182,6 +182,16 @@ public:
         }
     }
 
+    /// Stops read-protecting a page that is not GPU modified any more (Selective readbacks).
+    void ExcludeFromReadbacks(u64 offset) noexcept {
+        std::scoped_lock lk{mutex};
+        const u64 page = offset / BYTES_PER_PAGE;
+        if (gpu.GetPage(page)) {
+            return;
+        }
+        no_readback[page / PAGES_PER_WORD] |= 1ULL << (page % PAGES_PER_WORD);
+    }
+
     void Lock(const Bounds& bounds) noexcept {
         mutex.lock();
     }
@@ -215,7 +225,7 @@ private:
         if constexpr (gpu_op != StateOp::None) {
             const u64 prev = gpu[index];
             const u64 next = Apply<gpu_op>(prev, mask);
-            read_prot[index] = (next ^ prev) & mask;
+            read_prot[index] = (next ^ prev) & mask & ~no_readback[index];
             prot_word |= read_prot[index];
         }
         if (prot_word) {
@@ -309,7 +319,8 @@ private:
             } else if (state_op == StateOp::Clear) {
                 return PageOp::Track;
             }
-        } else if (type == Type::GPU && readbacks_mode == GpuReadbacksMode::Precise) {
+        } else if (type == Type::GPU && (readbacks_mode == GpuReadbacksMode::Precise ||
+                                         readbacks_mode == GpuReadbacksMode::Selective)) {
             if (state_op == StateOp::Set) {
                 return PageOp::Track;
             } else if (state_op == StateOp::Clear) {
@@ -334,6 +345,7 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
+    std::array<u64, NUM_REGION_WORDS> no_readback{};
     LockType mutex;
 };
 

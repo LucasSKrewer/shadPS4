@@ -4,6 +4,8 @@
 #pragma once
 
 #include <deque>
+#include <mutex>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -85,6 +87,13 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
 
+    /// Stops read-protecting the page at device_addr (Selective readbacks).
+    void ExcludeFromReadbacks(VAddr device_addr);
+
+    /// Selective readbacks: the guest keeps reading this page back, so stop faulting on it and
+    /// mirror its GPU writes to guest memory asynchronously at every submit instead.
+    void MarkHotReadbackPage(VAddr device_addr);
+
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
@@ -125,6 +134,8 @@ private:
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
+    void DownloadHotPages();
+
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 
@@ -164,6 +175,8 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    std::mutex hot_pages_mutex;
+    std::vector<VAddr> hot_pages;
 
     u32 arena_memory_type_index{};
     u32 block_size{};

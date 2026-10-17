@@ -48,6 +48,13 @@ public:
         });
     }
 
+    /// Stops read-protecting the page at cpu_addr (Selective readbacks)
+    void ExcludeFromReadbacks(VAddr cpu_addr) noexcept {
+        IteratePages(cpu_addr, 1, [](RegionManager* manager, u64 offset, u64) {
+            manager->ExcludeFromReadbacks(offset);
+        });
+    }
+
     /// Mark region as modified from the CPU
     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
